@@ -43,11 +43,16 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 # when absl is included as subproject (i.e. using add_subdirectory(abseil-cpp))
 # in the source tree of a project that uses it, install rules are disabled.
-if(NOT "^${CMAKE_SOURCE_DIR}$" STREQUAL "^${PROJECT_SOURCE_DIR}$")
-  option(ABSL_ENABLE_INSTALL "Enable install rule" OFF)
-else()
-  option(ABSL_ENABLE_INSTALL "Enable install rule" ON)
-endif()
+# if(NOT "^${CMAKE_SOURCE_DIR}$" STREQUAL "^${PROJECT_SOURCE_DIR}$")
+#   option(ABSL_ENABLE_INSTALL "Enable install rule" OFF)
+# else()
+#   option(ABSL_ENABLE_INSTALL "Enable install rule" ON)
+# endif()
+
+# For use as a third-party library.
+# This is necessary because we are using a version of CMake that is too old to support option overrides.
+# Remove this once CMake version is >=3.13.
+option(ABSL_ENABLE_INSTALL "Enable install rule" ON)
 
 list(APPEND CMAKE_MODULE_PATH
   ${CMAKE_CURRENT_LIST_DIR}/CMake
