@@ -30,7 +30,7 @@ package(default_visibility = [
     "//absl/random:__pkg__",
 ])
 
-licenses(["notice"])  # Apache 2.0
+licenses(["notice"])
 
 cc_library(
     name = "traits",
@@ -713,6 +713,18 @@ cc_test(
     linkopts = ABSL_DEFAULT_LINKOPTS,
     deps = [
         ":iostream_state_saver",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "uniform_helper_test",
+    size = "small",
+    srcs = ["uniform_helper_test.cc"],
+    copts = ABSL_TEST_COPTS,
+    linkopts = ABSL_DEFAULT_LINKOPTS,
+    deps = [
+        ":uniform_helper",
         "@com_google_googletest//:gtest_main",
     ],
 )

@@ -137,15 +137,14 @@ struct StringBtreeDefaultGreater {
 };
 
 // A helper class to convert a boolean comparison into a three-way "compare-to"
-// comparison that returns a negative value to indicate less-than, zero to
-// indicate equality and a positive value to indicate greater-than. This helper
+// comparison that returns an `absl::weak_ordering`. This helper
 // class is specialized for less<std::string>, greater<std::string>,
 // less<string_view>, greater<string_view>, less<absl::Cord>, and
 // greater<absl::Cord>.
 //
 // key_compare_to_adapter is provided so that btree users
 // automatically get the more efficient compare-to code when using common
-// google string types with common comparison functors.
+// Abseil string types with common comparison functors.
 // These string-like specializations also turn on heterogeneous lookup by
 // default.
 template <typename Compare>
@@ -189,6 +188,9 @@ struct common_params {
   // If Compare is a common comparator for a string-like type, then we adapt it
   // to use heterogeneous lookup and to be a key-compare-to comparator.
   using key_compare = typename key_compare_to_adapter<Compare>::type;
+  // True when key_compare has been adapted to StringBtreeDefault{Less,Greater}.
+  using is_key_compare_adapted =
+      absl::negation<std::is_same<key_compare, Compare>>;
   // A type which indicates if we have a key-compare-to functor or a plain old
   // key-compare functor.
   using is_key_compare_to = btree_is_key_compare_to<key_compare, Key>;
@@ -292,6 +294,11 @@ struct map_params : common_params<Key, Compare, Alloc, TargetNodeSize, Multi,
   }
   static const Key &key(const slot_type *s) { return slot_policy::key(s); }
   static const Key &key(slot_type *s) { return slot_policy::key(s); }
+  // For use in node handle.
+  static auto mutable_key(slot_type *s)
+      -> decltype(slot_policy::mutable_key(s)) {
+    return slot_policy::mutable_key(s);
+  }
   static mapped_type &value(value_type *value) { return value->second; }
 };
 
@@ -817,12 +824,16 @@ class btree_node {
     }
   }
 
+  static void transfer(slot_type *dest, slot_type *src, allocator_type *alloc) {
+    absl::container_internal::SanitizerUnpoisonObject(dest);
+    params_type::transfer(alloc, dest, src);
+    absl::container_internal::SanitizerPoisonObject(src);
+  }
+
   // Transfers value from slot `src_i` in `src_node` to slot `dest_i` in `this`.
   void transfer(const size_type dest_i, const size_type src_i,
                 btree_node *src_node, allocator_type *alloc) {
-    absl::container_internal::SanitizerUnpoisonObject(slot(dest_i));
-    params_type::transfer(alloc, slot(dest_i), src_node->slot(src_i));
-    absl::container_internal::SanitizerPoisonObject(src_node->slot(src_i));
+    transfer(slot(dest_i), src_node->slot(src_i), alloc);
   }
 
   // Transfers `n` values starting at value `src_i` in `src_node` into the
@@ -830,19 +841,11 @@ class btree_node {
   void transfer_n(const size_type n, const size_type dest_i,
                   const size_type src_i, btree_node *src_node,
                   allocator_type *alloc) {
-    absl::container_internal::SanitizerUnpoisonMemoryRegion(
-        slot(dest_i), n * sizeof(slot_type));
     for (slot_type *src = src_node->slot(src_i), *end = src + n,
                    *dest = slot(dest_i);
          src != end; ++src, ++dest) {
-      params_type::transfer(alloc, dest, src);
+      transfer(dest, src, alloc);
     }
-    // We take care to avoid poisoning transferred-to nodes in case of overlap.
-    const size_type overlap =
-        this == src_node ? (std::max)(src_i, dest_i + n) - src_i : 0;
-    assert(n >= overlap);
-    absl::container_internal::SanitizerPoisonMemoryRegion(
-        src_node->slot(src_i + overlap), (n - overlap) * sizeof(slot_type));
   }
 
   // Same as above, except that we start at the end and work our way to the
@@ -850,19 +853,11 @@ class btree_node {
   void transfer_n_backward(const size_type n, const size_type dest_i,
                            const size_type src_i, btree_node *src_node,
                            allocator_type *alloc) {
-    absl::container_internal::SanitizerUnpoisonMemoryRegion(
-        slot(dest_i), n * sizeof(slot_type));
     for (slot_type *src = src_node->slot(src_i + n - 1), *end = src - n,
                    *dest = slot(dest_i + n - 1);
          src != end; --src, --dest) {
-      params_type::transfer(alloc, dest, src);
+      transfer(dest, src, alloc);
     }
-    // We take care to avoid poisoning transferred-to nodes in case of overlap.
-    assert(this != src_node || dest_i >= src_i);
-    const size_type num_to_poison =
-        this == src_node ? (std::min)(n, dest_i - src_i) : n;
-    absl::container_internal::SanitizerPoisonMemoryRegion(
-        src_node->slot(src_i), num_to_poison * sizeof(slot_type));
   }
 
   template <typename P>
@@ -1021,6 +1016,9 @@ class btree {
   using node_type = btree_node<Params>;
   using is_key_compare_to = typename Params::is_key_compare_to;
   using init_type = typename Params::init_type;
+  using field_type = typename node_type::field_type;
+  using is_multi_container = typename Params::is_multi_container;
+  using is_key_compare_adapted = typename Params::is_key_compare_adapted;
 
   // We use a static empty node for the root/leftmost/rightmost of empty btrees
   // in order to avoid branching in begin()/end().
@@ -1055,7 +1053,7 @@ class btree {
 #endif
   }
 
-  enum {
+  enum : uint32_t {
     kNodeValues = node_type::kNodeValues,
     kMinNodeValues = kNodeValues / 2,
   };
@@ -1170,15 +1168,13 @@ class btree {
   }
 
   // Finds the range of values which compare equal to key. The first member of
-  // the returned pair is equal to lower_bound(key). The second member pair of
-  // the pair is equal to upper_bound(key).
+  // the returned pair is equal to lower_bound(key). The second member of the
+  // pair is equal to upper_bound(key).
   template <typename K>
-  std::pair<iterator, iterator> equal_range(const K &key) {
-    return {lower_bound(key), upper_bound(key)};
-  }
+  std::pair<iterator, iterator> equal_range(const K &key);
   template <typename K>
   std::pair<const_iterator, const_iterator> equal_range(const K &key) const {
-    return {lower_bound(key), upper_bound(key)};
+    return const_cast<btree *>(this)->equal_range(key);
   }
 
   // Inserts a value into the btree only if it does not already exist. The
@@ -1566,11 +1562,11 @@ inline void btree_node<P>::remove_values(const field_type i,
 
   if (!leaf()) {
     // Delete all children between begin and end.
-    for (field_type j = 0; j < to_erase; ++j) {
+    for (int j = 0; j < to_erase; ++j) {
       clear_and_delete(child(i + j + 1), alloc);
     }
     // Rotate children after end into new positions.
-    for (field_type j = i + to_erase + 1; j <= orig_finish; ++j) {
+    for (int j = i + to_erase + 1; j <= orig_finish; ++j) {
       set_child(j - to_erase, child(j));
       clear_child(j);
     }
@@ -1748,11 +1744,14 @@ void btree_node<P>::clear_and_delete(btree_node *node, allocator_type *alloc) {
 
   // Navigate to the leftmost leaf under node, and then delete upwards.
   while (!node->leaf()) node = node->start_child();
-  field_type pos = node->position();
+  // Use `int` because `pos` needs to be able to hold `kNodeValues+1`, which
+  // isn't guaranteed to be a valid `field_type`.
+  int pos = node->position();
   btree_node *parent = node->parent();
-  do {
-    // In each iteration of this loop, we delete one leaf node and go right.
-    for (; pos <= parent->finish(); ++pos) {
+  for (;;) {
+    // In each iteration of the next loop, we delete one leaf node and go right.
+    assert(pos <= parent->finish());
+    do {
       node = parent->child(pos);
       if (!node->leaf()) {
         // Navigate to the leftmost leaf under node.
@@ -1762,16 +1761,21 @@ void btree_node<P>::clear_and_delete(btree_node *node, allocator_type *alloc) {
       }
       node->value_destroy_n(node->start(), node->count(), alloc);
       deallocate(LeafSize(node->max_count()), node, alloc);
-    }
-    // If we've deleted all children of parent, then delete parent and go up.
-    for (; parent != delete_root_parent && pos > parent->finish(); ++pos) {
+      ++pos;
+    } while (pos <= parent->finish());
+
+    // Once we've deleted all children of parent, delete parent and go up/right.
+    assert(pos > parent->finish());
+    do {
       node = parent;
       pos = node->position();
       parent = node->parent();
       node->value_destroy_n(node->start(), node->count(), alloc);
       deallocate(InternalSize(), node, alloc);
-    }
-  } while (parent != delete_root_parent);
+      if (parent == delete_root_parent) return;
+      ++pos;
+    } while (pos > parent->finish());
+  }
 }
 
 ////
@@ -1886,6 +1890,40 @@ template <typename P>
 btree<P>::btree(const btree &other)
     : btree(other.key_comp(), other.allocator()) {
   copy_or_move_values_in_order(&other);
+}
+
+template <typename P>
+template <typename K>
+auto btree<P>::equal_range(const K &key) -> std::pair<iterator, iterator> {
+  const iterator lower = lower_bound(key);
+  // TODO(ezb): we should be able to avoid this comparison when there's a
+  // three-way comparator.
+  if (lower == end() || compare_keys(key, lower.key())) return {lower, lower};
+
+  const iterator next = std::next(lower);
+  // When the comparator is heterogeneous, we can't assume that comparison with
+  // non-`key_type` will be equivalent to `key_type` comparisons so there
+  // could be multiple equivalent keys even in a unique-container. But for
+  // heterogeneous comparisons from the default string adapted comparators, we
+  // don't need to worry about this.
+  if (!is_multi_container::value &&
+      (std::is_same<K, key_type>::value || is_key_compare_adapted::value)) {
+    // The next iterator after lower must point to a key greater than `key`.
+    // Note: if this assert fails, then it may indicate that the comparator does
+    // not meet the equivalence requirements for Compare
+    // (see https://en.cppreference.com/w/cpp/named_req/Compare).
+    assert(next == end() || compare_keys(key, next.key()));
+    return {lower, next};
+  }
+  // Try once more to avoid the call to upper_bound() if there's only one
+  // equivalent key. This should prevent all calls to upper_bound() in cases of
+  // unique-containers with heterogeneous comparators in which all comparison
+  // operators are equivalent.
+  if (next == end() || compare_keys(key, next.key())) return {lower, next};
+
+  // In this case, we need to call upper_bound() to avoid worst case O(N)
+  // behavior if we were to iterate over equal keys.
+  return {lower, upper_bound(key)};
 }
 
 template <typename P>
@@ -2431,7 +2469,7 @@ inline auto btree<P>::internal_emplace(iterator iter, Args &&... args)
     --iter;
     ++iter.position;
   }
-  const int max_count = iter.node->max_count();
+  const field_type max_count = iter.node->max_count();
   allocator_type *alloc = mutable_allocator();
   if (iter.node->count() == max_count) {
     // Make room in the leaf for the new item.

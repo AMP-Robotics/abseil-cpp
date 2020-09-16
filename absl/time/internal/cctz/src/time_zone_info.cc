@@ -295,7 +295,7 @@ bool TimeZoneInfo::EquivTransitions(std::uint_fast8_t tt1_index,
 // Find/make a transition type with these attributes.
 bool TimeZoneInfo::GetTransitionType(std::int_fast32_t utc_offset, bool is_dst,
                                      const std::string& abbr,
-                                     std::uint_fast8_t* index) {
+                                     std::uint_least8_t* index) {
   std::size_t type_index = 0;
   std::size_t abbr_index = abbreviations_.size();
   for (; type_index != transition_types_.size(); ++type_index) {
@@ -334,7 +334,7 @@ bool TimeZoneInfo::ExtendTransitions() {
   if (!ParsePosixSpec(future_spec_, &posix)) return false;
 
   // Find transition type for the future std specification.
-  std::uint_fast8_t std_ti;
+  std::uint_least8_t std_ti;
   if (!GetTransitionType(posix.std_offset, false, posix.std_abbr, &std_ti))
     return false;
 
@@ -345,7 +345,7 @@ bool TimeZoneInfo::ExtendTransitions() {
   }
 
   // Find transition type for the future dst specification.
-  std::uint_fast8_t dst_ti;
+  std::uint_least8_t dst_ti;
   if (!GetTransitionType(posix.dst_offset, true, posix.dst_abbr, &dst_ti))
     return false;
 
@@ -725,9 +725,9 @@ bool TimeZoneInfo::Load(const std::string& name) {
 
   // Find and use a ZoneInfoSource to load the named zone.
   auto zip = cctz_extension::zone_info_source_factory(
-      name, [](const std::string& name) -> std::unique_ptr<ZoneInfoSource> {
-        if (auto zip = FileZoneInfoSource::Open(name)) return zip;
-        if (auto zip = AndroidZoneInfoSource::Open(name)) return zip;
+      name, [](const std::string& n) -> std::unique_ptr<ZoneInfoSource> {
+        if (auto z = FileZoneInfoSource::Open(n)) return z;
+        if (auto z = AndroidZoneInfoSource::Open(n)) return z;
         return nullptr;
       });
   return zip != nullptr && Load(zip.get());

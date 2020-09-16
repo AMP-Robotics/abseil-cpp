@@ -15,6 +15,7 @@
 #include "absl/container/btree_test.h"
 
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <memory>
 #include <stdexcept>
@@ -1344,6 +1345,12 @@ class BtreeNodePeer {
   constexpr static size_t GetNumValuesPerNode() {
     return btree_node<typename Set::params_type>::kNodeValues;
   }
+
+  template <typename Set>
+  constexpr static size_t GetMaxFieldType() {
+    return std::numeric_limits<
+        typename btree_node<typename Set::params_type>::field_type>::max();
+  }
 };
 
 namespace {
@@ -2543,6 +2550,69 @@ TEST(Btree, HeterogeneousInsertOrAssign) {
   EXPECT_EQ(m[s], 2);
 }
 #endif
+
+// This test requires std::launder for mutable key access in node handles.
+#if defined(__cpp_lib_launder) && __cpp_lib_launder >= 201606
+TEST(Btree, NodeHandleMutableKeyAccess) {
+  {
+    absl::btree_map<std::string, std::string> map;
+
+    map["key1"] = "mapped";
+
+    auto nh = map.extract(map.begin());
+    nh.key().resize(3);
+    map.insert(std::move(nh));
+
+    EXPECT_THAT(map, ElementsAre(Pair("key", "mapped")));
+  }
+  // Also for multimap.
+  {
+    absl::btree_multimap<std::string, std::string> map;
+
+    map.emplace("key1", "mapped");
+
+    auto nh = map.extract(map.begin());
+    nh.key().resize(3);
+    map.insert(std::move(nh));
+
+    EXPECT_THAT(map, ElementsAre(Pair("key", "mapped")));
+  }
+}
+#endif
+
+struct MultiKey {
+  int i1;
+  int i2;
+};
+
+struct MultiKeyComp {
+  using is_transparent = void;
+  bool operator()(const MultiKey a, const MultiKey b) const {
+    if (a.i1 != b.i1) return a.i1 < b.i1;
+    return a.i2 < b.i2;
+  }
+  bool operator()(const int a, const MultiKey b) const { return a < b.i1; }
+  bool operator()(const MultiKey a, const int b) const { return a.i1 < b; }
+};
+
+// Test that when there's a heterogeneous comparator that behaves differently
+// for some heterogeneous operators, we get equal_range() right.
+TEST(Btree, MultiKeyEqualRange) {
+  absl::btree_set<MultiKey, MultiKeyComp> set;
+
+  for (int i = 0; i < 100; ++i) {
+    for (int j = 0; j < 100; ++j) {
+      set.insert({i, j});
+    }
+  }
+
+  for (int i = 0; i < 100; ++i) {
+    auto equal_range = set.equal_range(i);
+    EXPECT_EQ(equal_range.first->i1, i);
+    EXPECT_EQ(equal_range.first->i2, 0);
+    EXPECT_EQ(std::distance(equal_range.first, equal_range.second), 100) << i;
+  }
+}
 
 }  // namespace
 }  // namespace container_internal
